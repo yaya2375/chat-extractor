@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>聊天记录提取工具 - 微信 / QQ</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f0f2f5;--card:#fff;--text:#1a1a2e;--secondary:#888;--border:#e5e5e5;
+  --primary:#4f6ef7;--primary-hover:#3b5de7;--wechat:#07c160;--qq:#12b7f5;
+  --bubble-self:#95ec69;--bubble-other:#fff;--shadow:0 2px 12px rgba(0,0,0,.06);--radius:12px;
+}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--text);min-height:100vh;
+}
+.header{
+  background:var(--card);border-bottom:1px solid var(--border);
+  padding:14px 24px;display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:100;box-shadow:0 1px 4px rgba(0,0,0,.04);
+}
+.header h1{font-size:19px;font-weight:700;background:linear-gradient(135deg,var(--primary),#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.badges{display:flex;gap:8px}
+.badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
+.badge.wechat{background:var(--wechat)}.badge.qq{background:var(--qq)}
+
+.container{max-width:1200px;margin:0 auto;padding:24px;display:flex;gap:24px;min-height:calc(100vh - 70px)}
+.sidebar{width:320px;flex-shrink:0;display:flex;flex-direction:column;gap:16px}
+
+.card{background:var(--card);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}
+.card h3{font-size:12px;margin-bottom:12px;color:var(--secondary);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+
+/* Buttons */
+.btn{padding:8px 16px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap}
+.btn-primary{background:var(--primary);color:#fff}.btn-primary:hover{background:var(--primary-hover)}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}.btn-outline:hover{background:var(--bg)}
+.btn-sm{padding:5px 10px;font-size:11px}
+.btn-wx{background:var(--wechat);color:#fff}.btn-wx:hover{opacity:.9}
+.btn-qq{background:var(--qq);color:#fff}.btn-qq:hover{opacity:.9}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+
+/* Scan results */
+.account-item{
+  padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;
+  display:flex;justify-content:space-between;align-items:center;font-size:13px;
+}
+.account-item .name{font-weight:600}.account-item .meta{font-size:10px;color:var(--secondary)}
+.key-input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;outline:none;margin-top:6px;font-family:monospace}
+.key-input:focus{border-color:var(--primary)}
+
+/* Progress */
+.progress-wrap{display:none;margin-top:8px}
+.progress-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:4px}
+.progress-fill{height:100%;background:var(--primary);border-radius:3px;transition:width .3s;width:0}
+.progress-text{font-size:11px;color:var(--secondary)}
+
+/* Main chat area */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.chat-panel{flex:1;background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+.chat-header{padding:14px 18px;border-bottom:1px solid var(--border);font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between}
+.chat-header .count{font-size:11px;color:var(--secondary);font-weight:400}
+.messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px;background:#f8f8f8}
+.messages::-webkit-scrollbar{width:5px}.messages::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}
+
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#ccc;gap:10px}
+.empty .icon{font-size:56px}.empty h2{font-size:16px;color:#bbb;font-weight:400}.empty p{font-size:13px}
+
+.msg-group{display:flex;flex-direction:column;max-width:100%}
+.msg-group .sname{font-size:10px;color:var(--secondary);margin-bottom:2px;padding:0 4px}
+.msg-group.self{align-items:flex-end}.msg-group.other{align-items:flex-start}
+.msg-bubble{max-width:75%;padding:9px 13px;border-radius:8px;font-size:14px;line-height:1.6;word-break:break-word;white-space:pre-wrap}
+.msg-bubble.other{background:var(--bubble-other);border:1px solid #eee}
+.msg-bubble.self{background:var(--bubble-self)}
+.msg-date-divider{align-self:center;font-size:11px;color:#aaa;padding:3px 10px;background:#f0f0f0;border-radius:4px}
+.msg-time{font-size:10px;color:#bbb;margin-top:2px;padding:0 4px}
+mark{background:#fff3cd;padding:0 2px;border-radius:2px}
+
+/* Search & Filter */
+.search-wrap{position:relative}
+.search-wrap input{width:100%;padding:9px 14px 9px 36px;border:1px solid var(--border);border-radius:22px;font-size:13px;outline:none;background:var(--bg);transition:all .2s}
+.search-wrap input:focus{border-color:var(--primary);background:var(--card)}
+.search-wrap .sicon{position:absolute;left:13px;top:50%;transform:translateY(-50%);font-size:14px}
+.filter-group{margin-bottom:10px}
+.filter-group label{display:block;font-size:11px;font-weight:600;margin-bottom:4px;color:var(--secondary)}
+.filter-group input,.filter-group select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;outline:none}
+.filter-group input:focus,.filter-group select:focus{border-color:var(--primary)}
+.sender-list{max-height:180px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:4px}
+.sender-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:14px;font-size:11px;cursor:pointer;border:1px solid var(--border);transition:all .2s}
+.sender-chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.sender-chip .cnt{font-size:10px;opacity:.7}
+
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-item{text-align:center;padding:10px 6px;background:var(--bg);border-radius:8px}
+.stat-item .num{font-size:20px;font-weight:700;color:var(--primary)}.stat-item .label{font-size:10px;color:var(--secondary)}
+
+/* Self select */
+.self-row{display:flex;gap:8px;align-items:center;margin-top:8px}
+.self-row select{flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:12px;outline:none}
+
+/* Toast */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 24px;border-radius:24px;font-size:13px;z-index:999;animation:toastIn .3s;pointer-events:none}
+@keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+@media(max-width:768px){.container{flex-direction:column;padding:12px}.sidebar{width:100%}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>聊天记录提取工具</h1>
+  <div class="badges">
+    <span class="badge wechat">微信</span>
+    <span class="badge qq">QQ</span>
+  </div>
+</div>
+
+<div class="container">
+  <aside class="sidebar">
+    <!-- Scan & Extract -->
+    <div class="card">
+      <h3>数据提取</h3>
+      <button class="btn btn-primary" id="btnScan" style="width:100%">扫描已安装的微信/QQ</button>
+      <div id="scanResults" style="margin-top:8px"></div>
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-text" id="progressText"></div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="card" id="statsCard" style="display:none">
+      <h3>统计</h3>
+      <div class="stat-grid" id="statGrid"></div>
+      <div class="self-row">
+        <select id="selfSelect"><option value="">标记"我"的昵称</option></select>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card" id="filterCard" style="display:none">
+      <h3>筛选</h3>
+      <div class="filter-group">
+        <label>搜索</label>
+        <div class="search-wrap"><span class="sicon">&#128269;</span><input type="text" id="searchInput" placeholder="搜索聊天内容..."></div>
+      </div>
+      <div class="filter-group"><label>发送者</label><div class="sender-list" id="senderList"></div></div>
+      <div class="filter-group"><label>开始日期</label><input type="date" id="dateStart"></div>
+      <div class="filter-group"><label>结束日期</label><input type="date" id="dateEnd"></div>
+      <button class="btn btn-outline" id="btnReset" style="width:100%">重置</button>
+    </div>
+
+    <!-- Export -->
+    <div class="card" id="exportCard" style="display:none">
+      <h3>导出</h3>
+      <div class="btn-row">
+        <button class="btn btn-primary btn-sm" data-fmt="json">JSON</button>
+        <button class="btn btn-outline btn-sm" data-fmt="csv">CSV</button>
+        <button class="btn btn-outline btn-sm" data-fmt="txt">TXT</button>
+      </div>
+      <button class="btn btn-outline btn-sm" id="btnClear" style="width:100%;margin-top:8px;color:#ef4444;border-color:#fecaca">清除</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="chat-panel">
+      <div class="chat-header" id="chatHeader" style="display:none"><span>聊天记录</span><span class="count" id="msgCount"></span></div>
+      <div class="empty" id="emptyState"><div class="icon">&#128172;</div><h2>点击"扫描"开始</h2><p>自动发现微信/QQ本地数据库并提取聊天记录</p></div>
+      <div class="messages" id="messages" style="display:none"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────
+let allMsgs=[],selfSender='',filters={search:'',sender:'',dateStart:'',dateEnd:''};
+const $=id=>document.getElementById(id);
+
+// ── Scan ───────────────────────────────────────────────
+$('btnScan').addEventListener('click',async()=>{
+  $('btnScan').textContent='扫描中...';$('btnScan').disabled=true;
+  try{
+    const r=await fetch('/api/scan',{method:'POST'}).then(r=>r.json());
+    renderScanResults(r);
+  }catch(e){toast('扫描失败: '+e.message)}
+  finally{$('btnScan').textContent='重新扫描';$('btnScan').disabled=false}
+});
+
+function renderScanResults(r){
+  let h='';
+  // WeChat
+  if(r.wechat.found||r.wechat.accounts.length>0){
+    const wxVer=r.wechat.version||'';
+    const isV4=wxVer==='4.x';
+    h+=`<div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--wechat)">微信 ${isV4?'(新版 '+wxVer+')':''}</div>`;
+    if(r.wechat.accounts.length===0){
+      h+=`<div class="account-item"><span class="name">未找到账号</span><span class="meta">微信是否安装并登录过？</span></div>`;
+    }
+    r.wechat.accounts.forEach(a=>{
+      const ready=a.ready||a.has_databases||false;
+      const dbCount=a.db_count||0;
+      h+=`<div class="account-item">
+        <div><div class="name">${esc(a.wxid)}</div><div class="meta">${ready?dbCount+'个数据库 · 可提取':(dbCount>0?dbCount+'个数据库':'未检测到数据')}</div></div>`;
+      if(ready){
+        h+=`<div class="btn-row" style="margin-top:6px">
+          <button class="btn btn-wx btn-sm" data-extract="wechat" data-full="${esc(a.path||'')}">提取聊天记录</button>
+        </div>`;
+      }else{
+        h+=`<div style="font-size:11px;color:var(--secondary);margin-top:4px">${a.hint||'未检测到聊天数据库。请确认已登录微信。'}</div>`;
+        if(a.version&&a.version.startsWith('4')){
+          h+=`<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="toast('请按以下步骤操作：\\n1. 手机微信 → 我 → 设置 → 聊天 → 聊天记录迁移与备份\\n2. 选择"迁移到电脑微信"\\n3. 迁移完成后重新点击扫描即可提取')">查看迁移步骤</button>`;
+        }
+      }
+      if(a.error)h+=`<div style="font-size:10px;color:#ef4444;margin-top:4px">错误: ${esc(a.error)}</div>`;
+      h+=`</div>`;
+    });
+    if(!r.wechat.found)h+=`<div style="font-size:11px;color:var(--secondary);margin-bottom:8px">微信进程未检测到</div>`;
+  }
+  // QQ
+  if(r.qq.found||r.qq.accounts.length>0){
+    const qqVer=r.qq.version||'';
+    h+=`<div style="font-weight:600;font-size:13px;margin:12px 0 6px;color:var(--qq)">QQ ${qqVer?'('+qqVer+')':''}</div>`;
+    if(r.qq.accounts.length===0)h+=`<div class="account-item"><span class="name">未找到账号</span><span class="meta">QQ是否安装并登录过？</span></div>`;
+    r.qq.accounts.forEach(a=>{
+      const dbs=a.db_files?a.db_files.length:0;
+      h+=`<div class="account-item">
+        <div><div class="name">${esc(a.nickname||a.uin)}</div><div class="meta">${dbs}个数据库 · ${a.uin||''}</div></div>
+        <button class="btn btn-qq btn-sm" data-extract="qq" data-dir="${esc(a.uin||'')}" data-full="${esc(r.qq.base_dir+'/'+(a.uin||''))}">提取</button>
+      </div>`;
+    });
+  }
+  if(!h)h='<div style="font-size:13px;color:var(--secondary);text-align:center;padding:12px">未检测到微信或QQ安装</div>';
+  $('scanResults').innerHTML=h;
+  bindExtractButtons();
+}
+
+function bindExtractButtons(){
+  document.querySelectorAll('[data-extract]').forEach(btn=>{
+    btn.addEventListener('click',async function(){
+      const platform=this.dataset.extract;
+      const dir=this.dataset.full||this.dataset.dir;
+      if(!dir){toast('未找到数据目录');return}
+
+      $('progressWrap').style.display='';
+      $('progressFill').style.width='0%';
+      $('progressText').textContent='开始提取...';
+
+      const endpoint=platform==='wechat'?'/api/extract/wechat':'/api/extract/qq';
+      const body=platform==='wechat'?{account_dir:dir,auto_key:true}:{account_dir:dir};
+
+      try{
+        const resp=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if(!resp.ok){
+          const err=await resp.json();
+          if(err.need_manual_key){
+            // Show key input
+            const item=this.closest('.account-item');
+            if(item){
+              const keyRow=item.querySelector('.key-row');
+              if(keyRow)keyRow.style.display='';
+            }
+            toast('自动提取密钥失败，请手动输入');
+          }else{
+            toast('提取失败: '+(err.error||'未知错误'));
+          }
+          $('progressWrap').style.display='none';
+          return;
+        }
+        const reader=resp.body.getReader();
+        const decoder=new TextDecoder();
+        let buf='';
+        while(true){
+          const{value,done}=await reader.read();
+          if(done)break;
+          buf+=decoder.decode(value,{stream:true});
+          // Process SSE events
+          const lines=buf.split('\n');
+          buf=lines.pop()||'';
+          for(const l of lines){
+            if(l.startsWith('data: ')){
+              try{
+                const d=JSON.parse(l.slice(6));
+                if(d.type==='progress'){
+                  const pct=d.total>0?Math.round(d.step/d.total*100):50;
+                  $('progressFill').style.width=pct+'%';
+                  $('progressText').textContent=d.message||'处理中...';
+                }else if(d.type==='done'){
+                  $('progressFill').style.width='100%';
+                  $('progressText').textContent=`完成！已加载 ${d.count} 条消息`;
+                  toast(`成功提取 ${d.count} 条消息`);
+                  loadMessages();
+                }else if(d.type==='error'){
+                  toast('提取错误: '+d.error);
+                  $('progressText').textContent='错误: '+d.error;
+                }
+              }catch(ex){}
+            }
+          }
+        }
+        setTimeout(()=>{$('progressWrap').style.display='none'},2000);
+      }catch(e){
+        toast('请求失败: '+e.message);
+        $('progressWrap').style.display='none';
+      }
+    });
+  });
+  // Manual key buttons
+  document.querySelectorAll('[data-manual]').forEach(btn=>{
+    btn.addEventListener('click',async function(){
+      const dir=this.dataset.dir;
+      const input=this.parentElement.querySelector('.key-input');
+      const key=input?input.value.trim():'';
+      if(!key){toast('请输入密钥');return}
+      if(!dir){toast('未找到数据目录');return}
+
+      $('progressWrap').style.display='';
+      $('progressFill').style.width='0%';
+      try{
+        const resp=await fetch('/api/extract/wechat',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({account_dir:dir,key:key,auto_key:false})
+        });
+        if(!resp.ok){const err=await resp.json();toast(err.error||'提取失败');$('progressWrap').style.display='none';return}
+        const reader=resp.body.getReader();
+        const decoder=new TextDecoder();
+        let buf='';
+        while(true){
+          const{value,done}=await reader.read();
+          if(done)break;
+          buf+=decoder.decode(value,{stream:true});
+          const lines=buf.split('\n');buf=lines.pop()||'';
+          for(const l of lines){
+            if(l.startsWith('data: ')){
+              try{
+                const d=JSON.parse(l.slice(6));
+                if(d.type==='done'){toast(`成功提取 ${d.count} 条消息`);loadMessages()}
+                else if(d.type==='error'){toast('错误: '+d.error)}
+              }catch(ex){}
+            }
+          }
+        }
+        setTimeout(()=>{$('progressWrap').style.display='none'},2000);
+      }catch(e){toast('请求失败: '+e.message);$('progressWrap').style.display='none'}
+    });
+  });
+}
+
+// ── Load Messages ──────────────────────────────────────
+async function loadMessages(){
+  const params=new URLSearchParams({per_page:5000});
+  if(filters.search)params.set('search',filters.search);
+  if(filters.sender)params.set('sender',filters.sender);
+  if(filters.dateStart)params.set('date_start',filters.dateStart);
+  if(filters.dateEnd)params.set('date_end',filters.dateEnd);
+
+  try{
+    const r=await fetch('/api/messages?'+params).then(r=>r.json());
+    allMsgs=r.messages||[];
+    renderAll();
+  }catch(e){toast('加载消息失败')}
+}
+
+async function loadStats(){
+  try{
+    const r=await fetch('/api/stats').then(r=>r.json());
+    if(!r.total)return;
+    $('statsCard').style.display='';
+    $('statGrid').innerHTML=`
+      <div class="stat-item"><div class="num">${r.total}</div><div class="label">消息总数</div></div>
+      <div class="stat-item"><div class="num">${r.senders?.length||0}</div><div class="label">参与人数</div></div>
+      <div class="stat-item"><div class="num">${r.date_range?.days||0}天</div><div class="label">时间跨度</div></div>
+      <div class="stat-item"><div class="num">${Object.keys(r.platforms||{}).join('/')||'-'}</div><div class="label">平台</div></div>`;
+    // Self select
+    const sel=$('selfSelect');
+    const cur=sel.value;
+    sel.innerHTML='<option value="">标记"我"的昵称</option>'+(r.senders||[]).map(s=>`<option value="${esc(s.name)}"${s.name===cur?' selected':''}>${esc(s.name)}</option>`).join('');
+    sel.onchange=()=>{selfSender=sel.value;renderMessages()};
+  }catch(e){}
+}
+
+function renderAll(){
+  loadStats();
+  renderMessages();
+  renderFilters();
+  $('filterCard').style.display='';
+  $('exportCard').style.display='';
+  $('chatHeader').style.display='';
+}
+
+// ── Render Messages ────────────────────────────────────
+function renderMessages(){
+  if(allMsgs.length===0){$('messages').style.display='none';$('emptyState').style.display='';return}
+  $('messages').style.display='flex';$('emptyState').style.display='none';
+  $('msgCount').textContent=`${allMsgs.length} 条消息`;
+
+  let h='',lastDate='',lastSender='',q=filters.search.toLowerCase();
+  allMsgs.forEach(m=>{
+    const d=formatDate(m.time);
+    const t=formatTime(m.time);
+    if(d!==lastDate){
+      h+=`<div class="msg-date-divider">${d} 星期${['日','一','二','三','四','五','六'][new Date(m.time).getDay()]}</div>`;
+      lastDate=d;lastSender='';
+    }
+    const isSelf=selfSender&&m.sender===selfSender;
+    const side=isSelf?'self':'other';
+    const label=(m.sender!==lastSender)?`<div class="sname">${esc(m.sender)}</div>`:'';
+    let c=esc(m.content);
+    if(q)c=c.replace(new RegExp(`(${escRe(q)})`,'gi'),'<mark>$1</mark>');
+    c=c.replace(/(https?:\/\/[^\s<>"]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+    const icons={image:'🖼',voice:'🎤',video:'🎬',file:'📎',emoji:'😊',link:'🔗',redpacket:'🧧'};
+    const icon=icons[m.type]?icons[m.type]+' ':'';
+    h+=`<div class="msg-group ${side}">${label}<div class="msg-bubble ${side}">${icon}${c}</div><div class="msg-time">${t} · ${m.platform}</div></div>`;
+    lastSender=m.sender;
+  });
+  $('messages').innerHTML=h;
+  setTimeout(()=>{$('messages').scrollTop=$('messages').scrollHeight},50);
+}
+
+function renderFilters(){
+  const counts={};allMsgs.forEach(m=>{counts[m.sender]=(counts[m.sender]||0)+1});
+  const sorted=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+  $('senderList').innerHTML=sorted.map(([n,c])=>`<span class="sender-chip${n===filters.sender?' active':''}" data-s="${esc(n)}">${esc(n)}<span class="cnt">${c}</span></span>`).join('');
+  $('senderList').querySelectorAll('.sender-chip').forEach(ch=>{ch.addEventListener('click',()=>{filters.sender=filters.sender===ch.dataset.s?'':ch.dataset.s;renderFilters();loadMessages()})});
+}
+
+// ── Filter events ──────────────────────────────────────
+$('searchInput').addEventListener('input',e=>{filters.search=e.target.value;loadMessages()});
+$('dateStart').addEventListener('change',e=>{filters.dateStart=e.target.value;loadMessages()});
+$('dateEnd').addEventListener('change',e=>{filters.dateEnd=e.target.value;loadMessages()});
+$('btnReset').addEventListener('click',()=>{
+  filters={search:'',sender:'',dateStart:'',dateEnd:''};
+  $('searchInput').value='';$('dateStart').value='';$('dateEnd').value='';
+  renderFilters();loadMessages();
+});
+
+// ── Export ─────────────────────────────────────────────
+$('exportCard').addEventListener('click',e=>{
+  if(e.target.tagName!=='BUTTON'||!e.target.dataset.fmt)return;
+  window.open('/api/export/'+e.target.dataset.fmt,'_blank');
+});
+
+// ── Clear ──────────────────────────────────────────────
+$('btnClear').addEventListener('click',async()=>{
+  if(!confirm('确定清除所有数据？'))return;
+  await fetch('/api/clear',{method:'POST'});
+  allMsgs=[];selfSender='';filters={search:'',sender:'',dateStart:'',dateEnd:''};
+  ['statsCard','filterCard','exportCard','chatHeader'].forEach(id=>$(id).style.display='none');
+  $('messages').style.display='none';$('emptyState').style.display='';
+  $('scanResults').innerHTML='';
+  toast('已清除');
+});
+
+// ── Helpers ────────────────────────────────────────────
+function formatDate(ts){const d=new Date(ts);return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`}
+function formatTime(ts){const d=new Date(ts);return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`}
+function p(n){return String(n).padStart(2,'0')}
+function esc(s){const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'};return String(s).replace(/[&<>"']/g,c=>m[c])}
+function escRe(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}
+function toast(m){const t=document.createElement('div');t.className='toast';t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),2500)}
+
+// Auto scan on load
+window.addEventListener('DOMContentLoaded',()=>{$('btnScan').click()});
+</script>
+</body>
+</html>

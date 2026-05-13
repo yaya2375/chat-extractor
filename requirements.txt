@@ -1,0 +1,4 @@
+flask>=3.0
+pymem>=1.14
+psutil>=5.9
+pycryptodome>=3.20
