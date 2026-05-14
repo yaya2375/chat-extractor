@@ -188,50 +188,92 @@ $('btnScan').addEventListener('click',async()=>{
 
 function renderScanResults(r){
   let h='';
+
+  // ── WeChatMsg bridge status ──
+  const wm=r.wechatmsg_available||{};
+  const hasWM=wm.available;
+
   // WeChat
   if(r.wechat.found||r.wechat.accounts.length>0){
     const wxVer=r.wechat.version||'';
-    const isV4=wxVer==='4.x';
-    h+=`<div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--wechat)">微信 ${isV4?'(新版 '+wxVer+')':''}</div>`;
-    if(r.wechat.accounts.length===0){
-      h+=`<div class="account-item"><span class="name">未找到账号</span><span class="meta">微信是否安装并登录过？</span></div>`;
-    }
+    h+=`<div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--wechat)">微信 (${wxVer||'未知版本'})</div>`;
+
     r.wechat.accounts.forEach(a=>{
-      const ready=a.ready||a.has_databases||false;
       const dbCount=a.db_count||0;
+      const dbList=a.dbs||[];
+      const typeLabels={'4.x_migrated':'迁移数据','4.x_roam':'本地同步数据','4.x_app':'程序配置','3.x':'旧版数据'};
+      const typeLabel=typeLabels[a.type]||a.type||'';
+
       h+=`<div class="account-item">
-        <div><div class="name">${esc(a.wxid)}</div><div class="meta">${ready?dbCount+'个数据库 · 可提取':(dbCount>0?dbCount+'个数据库':'未检测到数据')}</div></div>`;
-      if(ready){
-        h+=`<div class="btn-row" style="margin-top:6px">
-          <button class="btn btn-wx btn-sm" data-extract="wechat" data-full="${esc(a.path||'')}">提取聊天记录</button>
-        </div>`;
-      }else{
-        h+=`<div style="font-size:11px;color:var(--secondary);margin-top:4px">${a.hint||'未检测到聊天数据库。请确认已登录微信。'}</div>`;
-        if(a.version&&a.version.startsWith('4')){
-          h+=`<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="toast('请按以下步骤操作：\\n1. 手机微信 → 我 → 设置 → 聊天 → 聊天记录迁移与备份\\n2. 选择"迁移到电脑微信"\\n3. 迁移完成后重新点击扫描即可提取')">查看迁移步骤</button>`;
-        }
+        <div><div class="name">${esc(a.wxid)}</div>
+        <div class="meta">${typeLabel} · ${dbCount}个文件</div></div>`;
+
+      if(dbList.length>0){
+        h+=`<div style="font-size:10px;color:var(--secondary);margin:4px 0">`;
+        dbList.slice(0,6).forEach(d=>{
+          const sizeMB=(d.size/1024/1024).toFixed(1);
+          h+=`<span style="display:inline-block;margin:2px;padding:2px 6px;background:var(--bg);border-radius:4px">${esc(d.name)} (${sizeMB}MB)</span>`;
+        });
+        if(dbList.length>6)h+=` +${dbList.length-6}个`;
+        h+=`</div>`;
       }
-      if(a.error)h+=`<div style="font-size:10px;color:#ef4444;margin-top:4px">错误: ${esc(a.error)}</div>`;
+
+      if(dbCount>0){
+        h+=`<div class="btn-row" style="margin-top:6px">
+          <button class="btn btn-wx btn-sm" data-extract="wechat" data-full="${esc(a.path||'')}">尝试提取</button>
+        </div>`;
+      }
       h+=`</div>`;
     });
     if(!r.wechat.found)h+=`<div style="font-size:11px;color:var(--secondary);margin-bottom:8px">微信进程未检测到</div>`;
   }
+
+  // WeChatMsg bridge card
+  h+=`<div style="margin-top:12px;padding:10px 12px;border:1px solid ${hasWM?'var(--wechat)':'var(--border)'};border-radius:8px;font-size:12px">
+    <div style="font-weight:600;margin-bottom:4px;color:${hasWM?'var(--wechat)':'var(--secondary)'}">
+      ${hasWM?'已检测到 WeChatMsg 解密引擎':'WeChatMsg 解密引擎'}
+    </div>`;
+  if(hasWM){
+    h+=`<div style="color:var(--secondary);margin-bottom:6px">路径: ${esc(wm.path)}</div>
+      <button class="btn btn-wx btn-sm" id="btnWMExport">调用 WeChatMsg 导出</button>`;
+  }else{
+    h+=`<div style="color:var(--secondary);margin-bottom:6px">下载 WeChatMsg 解密引擎以实现完整提取</div>
+      <a href="https://github.com/LC044/WeChatMsg/releases" target="_blank" style="font-size:11px;color:var(--primary)">下载 WeChatMsg Release →</a>`;
+  }
+  h+=`</div>`;
+
   // QQ
   if(r.qq.found||r.qq.accounts.length>0){
     const qqVer=r.qq.version||'';
     h+=`<div style="font-weight:600;font-size:13px;margin:12px 0 6px;color:var(--qq)">QQ ${qqVer?'('+qqVer+')':''}</div>`;
-    if(r.qq.accounts.length===0)h+=`<div class="account-item"><span class="name">未找到账号</span><span class="meta">QQ是否安装并登录过？</span></div>`;
     r.qq.accounts.forEach(a=>{
       const dbs=a.db_files?a.db_files.length:0;
       h+=`<div class="account-item">
         <div><div class="name">${esc(a.nickname||a.uin)}</div><div class="meta">${dbs}个数据库 · ${a.uin||''}</div></div>
-        <button class="btn btn-qq btn-sm" data-extract="qq" data-dir="${esc(a.uin||'')}" data-full="${esc(r.qq.base_dir+'/'+(a.uin||''))}">提取</button>
+        <button class="btn btn-qq btn-sm" data-extract="qq" data-full="${esc(a.path||'')}">提取</button>
       </div>`;
     });
   }
+
   if(!h)h='<div style="font-size:13px;color:var(--secondary);text-align:center;padding:12px">未检测到微信或QQ安装</div>';
   $('scanResults').innerHTML=h;
   bindExtractButtons();
+
+  // WeChatMsg export button
+  if(hasWM){
+    $('btnWMExport')?.addEventListener('click',async()=>{
+      $('progressWrap').style.display='';
+      $('progressFill').style.width='30%';
+      $('progressText').textContent='调用 WeChatMsg 导出中...';
+      try{
+        const resp=await fetch('/api/wechatmsg/export',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        const d=await resp.json();
+        if(d.error){toast('导出失败: '+d.error);}
+        else{toast('WeChatMsg 导出完成，已导入 '+d.imported+' 条消息');loadMessages();}
+      }catch(e){toast('请求失败: '+e.message)}
+      $('progressWrap').style.display='none';
+    });
+  }
 }
 
 function bindExtractButtons(){

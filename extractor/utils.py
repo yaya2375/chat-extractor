@@ -1,142 +1,249 @@
-"""Path discovery utilities for WeChat (3.x and 4.x) and QQ on Windows."""
+"""Path discovery utilities for WeChat (3.x, 4.x) and QQ on Windows."""
+
 import os
 import re
 import glob
 import winreg
+import subprocess
 
 
-# ── WeChat discovery ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  WeChat discovery
+# ═══════════════════════════════════════════════════════════
 
-def find_wechat_data_dirs():
-    """Find all WeChat account data directories (v3.x + v4.x).
+def find_all_wechat_paths():
+    """Deep scan for ALL WeChat data paths.
 
-    Returns (version, base_dir, [account_dirs]) or (None, None, []).
+    Returns a list of dicts, each describing a found account.
     """
-    accounts = []
+    results = []
 
-    # 1. WeChat 4.x chat data: Documents/xwechat_files/<wxid>/db_storage/
-    v4_data_base = os.path.expanduser(r"~\Documents\xwechat_files")
-    if os.path.isdir(v4_data_base):
-        for name in os.listdir(v4_data_base):
-            full = os.path.join(v4_data_base, name)
-            db_storage = os.path.join(full, "db_storage")
-            if os.path.isdir(full) and name.startswith("wxid_"):
-                accounts.append(('4.x', full))
+    # 1) Documents-based paths (3.x + 4.x migrated data)
+    for doc_base in _get_document_paths():
+        # 4.x: xwechat_files/<wxid>/db_storage/
+        v4_path = os.path.join(doc_base, 'xwechat_files')
+        if os.path.isdir(v4_path):
+            for name in os.listdir(v4_path):
+                full = os.path.join(v4_path, name)
+                if os.path.isdir(full) and name.startswith('wxid_'):
+                    results.append(_build_entry(full, '4.x_migrated', doc_base))
 
-    # 2. WeChat 4.x program directory (for key extraction, no DB here)
-    v4_app_base = os.path.expanduser(r"~\AppData\Roaming\Tencent\xwechat")
-    login_dir = os.path.join(v4_app_base, "login")
+        # 3.x: WeChat Files/<wxid>/Msg/
+        for folder_name in ['WeChat Files', 'WeChat']:
+            v3_path = os.path.join(doc_base, folder_name)
+            if not os.path.isdir(v3_path):
+                continue
+            for name in os.listdir(v3_path):
+                full = os.path.join(v3_path, name)
+                if os.path.isdir(full) and (name.startswith('wxid_')
+                   or os.path.isdir(os.path.join(full, 'Msg'))):
+                    results.append(_build_entry(full, '3.x', doc_base))
+
+    # 2) AppData roam — WeChat 4.x running data (roam databases)
+    roam_base = os.path.expanduser(
+        r'~\AppData\Roaming\Tencent\xwechat\roam\ilink_im')
+    if os.path.isdir(roam_base):
+        for app_dir in os.listdir(roam_base):
+            app_path = os.path.join(roam_base, app_dir)
+            if not os.path.isdir(app_path) or not app_dir.startswith('app_'):
+                continue
+            # Find wxid from login dir
+            wxid = _find_wxid_from_xwechat()
+            if not wxid:
+                wxid = 'unknown'
+            # Find databases under im2_*/database/
+            im2_base = os.path.join(app_path)
+            for im2_name in os.listdir(im2_base):
+                im2_path = os.path.join(im2_base, im2_name)
+                db_path = os.path.join(im2_path, 'database')
+                if os.path.isdir(db_path):
+                    results.append(_build_entry(
+                        im2_path, '4.x_roam',
+                        os.path.dirname(roam_base),
+                        wxid=wxid))
+
+    # 3) AppData config — login dir only (key material)
+    xwc_base = os.path.expanduser(r'~\AppData\Roaming\Tencent\xwechat')
+    login_dir = os.path.join(xwc_base, 'login')
     if os.path.isdir(login_dir):
         for name in os.listdir(login_dir):
             full = os.path.join(login_dir, name)
-            if os.path.isdir(full) and name.startswith("wxid_"):
-                # Only add if not already found in xwechat_files
-                if not any(a[1] == full for a in accounts):
-                    accounts.append(('4.x_app', full))
+            if os.path.isdir(full) and name.startswith('wxid_'):
+                if not any(r.get('wxid') == name for r in results):
+                    results.append(_build_entry(full, '4.x_app',
+                                                xwc_base, wxid=name))
 
-    # 3. WeChat 3.x: Documents/WeChat Files/<wxid>/Msg/
-    for base in [
-        os.path.expanduser("~/Documents/WeChat Files"),
-        os.path.expanduser("~/Documents/WeChat"),
-        "C:/WeChat Files", "D:/WeChat Files",
-    ]:
-        if not os.path.isdir(base):
-            continue
-        for name in os.listdir(base):
-            full = os.path.join(base, name)
-            msg_dir = os.path.join(full, "Msg")
-            if os.path.isdir(full) and (
-                name.startswith("wxid_") or os.path.isdir(msg_dir)
-            ):
-                accounts.append(('3.x', full))
+    return results
 
-    if not accounts:
+
+def _get_document_paths():
+    """Get all possible 'Documents' paths including OneDrive redirects."""
+    paths = []
+    home = os.path.expanduser('~')
+    for cand in ['Documents', 'OneDrive\\文档', 'OneDrive\\Documents',
+                 'My Documents']:
+        p = os.path.join(home, cand)
+        if os.path.isdir(p):
+            paths.append(p)
+    # Also try common roots
+    for drive in ['C:', 'D:']:
+        p = os.path.join(drive, 'Users', os.environ.get('USERNAME', ''),
+                         'Documents')
+        if os.path.isdir(p) and p not in paths:
+            paths.append(p)
+    return paths
+
+
+def _find_wxid_from_xwechat():
+    """Extract wxid from xwechat login directory."""
+    login = os.path.expanduser(
+        r'~\AppData\Roaming\Tencent\xwechat\login')
+    if os.path.isdir(login):
+        for name in os.listdir(login):
+            if name.startswith('wxid_'):
+                return name
+    return None
+
+
+def _build_entry(path, dtype, base_dir, wxid=None):
+    """Build a standard account entry dict."""
+    if not wxid:
+        wxid = os.path.basename(path)
+        if not wxid.startswith('wxid_'):
+            wxid = os.path.basename(os.path.dirname(path))
+    entry = {
+        'path': path,
+        'wxid': wxid,
+        'type': dtype,
+        'base_dir': base_dir,
+    }
+
+    # Count actual database files
+    dbs = _list_wechat_dbs(path, dtype)
+    entry['dbs'] = dbs
+    entry['db_count'] = len(dbs)
+    entry['ready'] = len(dbs) > 0
+
+    return entry
+
+
+def _list_wechat_dbs(path, dtype):
+    """List decryptable database files in a WeChat data directory."""
+    dbs = []
+
+    def _add(filepath, label):
+        if os.path.isfile(filepath):
+            dbs.append({
+                'path': filepath,
+                'name': os.path.basename(filepath),
+                'label': label,
+                'size': os.path.getsize(filepath),
+            })
+
+    if 'migrated' in dtype:
+        # xwechat_files/<wxid>/db_storage/
+        msg_dir = os.path.join(path, 'db_storage', 'message')
+        if os.path.isdir(msg_dir):
+            for f in sorted(os.listdir(msg_dir)):
+                if re.match(r'^message_\d+\.db$', f):
+                    _add(os.path.join(msg_dir, f), 'message')
+        contact = os.path.join(path, 'db_storage', 'contact', 'contact.db')
+        _add(contact, 'contact')
+
+    elif 'roam' in dtype:
+        # xwechat/roam/.../im2_xxx/database/
+        db_dir = os.path.join(path, 'database')
+        if os.path.isdir(db_dir):
+            for f in os.listdir(db_dir):
+                if f.endswith('.db'):
+                    _add(os.path.join(db_dir, f), 'roam')
+            # kb.bin — key bundle
+            kb = os.path.join(db_dir, 'kb.bin')
+            if os.path.isfile(kb):
+                dbs.append({
+                    'path': kb,
+                    'name': 'kb.bin',
+                    'label': 'key_bundle',
+                    'size': os.path.getsize(kb),
+                })
+
+    else:
+        # 3.x: WeChat Files/<wxid>/Msg/
+        msg_dir = os.path.join(path, 'Msg')
+        # Main Msg/*.db
+        if os.path.isdir(msg_dir):
+            for f in sorted(os.listdir(msg_dir)):
+                fp = os.path.join(msg_dir, f)
+                if os.path.isfile(fp) and f.endswith('.db'):
+                    _add(fp, 'db')
+            # Msg/Multi/MSG*.db
+            multi = os.path.join(msg_dir, 'Multi')
+            if os.path.isdir(multi):
+                for f in sorted(os.listdir(multi)):
+                    fp = os.path.join(multi, f)
+                    if os.path.isfile(fp) and f.endswith('.db'):
+                        _add(fp, 'msg_db')
+
+    return dbs
+
+
+def find_wechat_data_dirs():
+    """Backward-compatible wrapper, returns (version, base_dir, [paths])."""
+    all_found = find_all_wechat_paths()
+    if not all_found:
         return None, None, []
 
     # Determine primary version
-    versions = set(a[0] for a in accounts)
-    primary = '4.x' if any(v.startswith('4.x') for v in versions) else '3.x'
+    types = {e['type'] for e in all_found}
+    primary = '4.x' if any('4.x' in t for t in types) else '3.x'
+    base = all_found[0]['base_dir']
+    paths = [e['path'] for e in all_found]
 
-    # Merge: group by version, return best base
-    if primary.startswith('4.x'):
-        # Prefer xwechat_files as base (has actual databases)
-        v4_entries = [a for a in accounts if a[0] == '4.x']
-        v4app_entries = [a for a in accounts if a[0] == '4.x_app']
-        all_v4 = v4_entries + v4app_entries
-        if all_v4:
-            return '4.x', v4_data_base if v4_entries else v4_app_base, [a[1] for a in all_v4]
-    else:
-        return '3.x', os.path.dirname(accounts[0][1]) if accounts else None, [a[1] for a in accounts]
-
-    return None, None, []
+    return primary, base, paths
 
 
-def _find_xwechat_accounts(base_dir):
-    """Find WeChat 4.x accounts from xwechat directory."""
-    accounts = []
-    login_dir = os.path.join(base_dir, "login")
-    if not os.path.isdir(login_dir):
-        return accounts
-    for name in os.listdir(login_dir):
-        full = os.path.join(login_dir, name)
-        if os.path.isdir(full) and name.startswith("wxid_"):
-            accounts.append(full)
-    # Also check radium/users for account hashes
-    users_dir = os.path.join(base_dir, "radium", "users")
-    if os.path.isdir(users_dir):
-        for name in os.listdir(users_dir):
-            full = os.path.join(users_dir, name)
-            if os.path.isdir(full) and len(name) == 32:
-                # This is a hash-based user dir
-                pass  # Handled via login dir above
-    return accounts
+# ═══════════════════════════════════════════════════════════
+#  WeChat executable
+# ═══════════════════════════════════════════════════════════
+
+_PROC_NAMES = ['Weixin.exe', 'WeChatAppEx.exe', 'WeChat.exe']
 
 
 def find_wechat_exe():
-    """Find WeChat executable (3.x: WeChat.exe, 4.x: WeChatAppEx.exe)."""
-    # Check running processes first
-    import subprocess
-    try:
-        out = subprocess.check_output(
-            ['tasklist', '/FI', 'IMAGENAME eq WeChatAppEx.exe', '/FO', 'CSV', '/NH'],
-            timeout=5, encoding='utf-8', errors='ignore')
-        if 'WeChatAppEx.exe' in out:
-            # WeChat 4.x is running, find the exe path
-            path = _find_exe_from_process('WeChatAppEx.exe')
-            if path:
-                return '4.x', path
-            # Fallback: search for it
-            for exe_path in _search_exe('WeChatAppEx.exe'):
-                return '4.x', exe_path
-    except Exception:
-        pass
+    """Find WeChat executable. Returns (version_label, path) or (None, None)."""
+    for name in _PROC_NAMES:
+        path = _find_exe_from_process(name)
+        if path:
+            ver = '4.x' if name in ('Weixin.exe', 'WeChatAppEx.exe') else '3.x'
+            return ver, path
 
-    try:
-        out = subprocess.check_output(
-            ['tasklist', '/FI', 'IMAGENAME eq WeChat.exe', '/FO', 'CSV', '/NH'],
-            timeout=5, encoding='utf-8', errors='ignore')
-        if 'WeChat.exe' in out:
-            path = _find_exe_from_process('WeChat.exe')
-            if path:
-                return '3.x', path
-    except Exception:
-        pass
-
-    # Search filesystem
-    for exe_name in ['WeChatAppEx.exe', 'WeChat.exe']:
-        result = _search_exe(exe_name)
-        if result:
-            ver = '4.x' if 'WeChatAppEx' in exe_name else '3.x'
-            return ver, result
+    # Fallback: filesystem search
+    for name in _PROC_NAMES:
+        for base in [
+            os.path.expanduser(r'~\AppData\Roaming\Tencent'),
+            os.path.expanduser(r'~\AppData\Local\Tencent'),
+            r'C:\Program Files\Tencent',
+            r'C:\Program Files (x86)\Tencent',
+        ]:
+            for root, dirs, files in os.walk(base):
+                if root[len(base):].count(os.sep) > 5:
+                    dirs.clear()
+                    continue
+                if name in files:
+                    ver = '4.x' if name in ('Weixin.exe', 'WeChatAppEx.exe') else '3.x'
+                    return ver, os.path.join(root, name)
 
     return None, None
 
 
 def _find_exe_from_process(name):
-    """Get full path of a running process using PowerShell."""
-    import subprocess
+    """Get full path of a running process."""
     try:
-        cmd = f"(Get-Process -Name '{name.replace('.exe','')}' -ErrorAction SilentlyContinue | Select-Object -First 1).MainModule.FileName"
+        base = name.replace('.exe', '')
+        cmd = (
+            f"(Get-Process -Name '{base}' -ErrorAction SilentlyContinue "
+            f"| Select-Object -First 1).MainModule.FileName"
+        )
         out = subprocess.check_output(
             ['powershell', '-Command', cmd],
             timeout=10, encoding='utf-8', errors='ignore')
@@ -148,27 +255,9 @@ def _find_exe_from_process(name):
     return None
 
 
-def _search_exe(name):
-    """Search common locations for an executable."""
-    dirs_to_search = [
-        os.path.expanduser(r"~\AppData\Roaming\Tencent"),
-        os.path.expanduser(r"~\AppData\Local\Tencent"),
-        r"C:\Program Files\Tencent",
-        r"C:\Program Files (x86)\Tencent",
-    ]
-    for base in dirs_to_search:
-        for root, dirnames, filenames in os.walk(base):
-            # Limit depth
-            depth = root[len(base):].count(os.sep)
-            if depth > 5:
-                dirnames.clear()
-                continue
-            if name in filenames:
-                return os.path.join(root, name)
-    return None
-
-
-# ── QQ discovery ──────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  QQ discovery
+# ═══════════════════════════════════════════════════════════
 
 def find_qq_data_dirs():
     """Find all QQ account data directories."""
@@ -190,22 +279,12 @@ def find_qq_data_dirs():
 
 
 def find_qq_exe():
-    """Find QQ executable path."""
-    import subprocess
-    # Check process first
+    """Find QQ executable. Returns (version_label, path) or (None, None)."""
     for proc_name in ['QQ.exe', 'QQNT.exe']:
-        try:
-            out = subprocess.check_output(
-                ['tasklist', '/FI', f'IMAGENAME eq {proc_name}', '/FO', 'CSV', '/NH'],
-                timeout=5, encoding='utf-8', errors='ignore')
-            if proc_name in out:
-                path = _find_exe_from_process(proc_name)
-                if path:
-                    return 'NT' if 'QQNT' in proc_name else 'classic', path
-        except Exception:
-            pass
+        path = _find_exe_from_process(proc_name)
+        if path:
+            return 'NT' if 'QQNT' in path else 'classic', path
 
-    # Search filesystem
     search_paths = [
         r"C:\Program Files\Tencent\QQNT\QQ.exe",
         r"C:\Program Files (x86)\Tencent\QQNT\QQ.exe",
@@ -216,51 +295,23 @@ def find_qq_exe():
         if os.path.exists(p):
             return 'NT' if 'QQNT' in p else 'classic', p
 
-    # Try registry
-    try:
-        for root in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
-            for sub in [r"SOFTWARE\Tencent\QQ", r"SOFTWARE\Tencent\QQNT",
-                        r"SOFTWARE\WOW6432Node\Tencent\QQ"]:
-                try:
-                    key = winreg.OpenKey(root, sub)
-                    path, _ = winreg.QueryValueEx(key, "InstallPath")
-                    winreg.CloseKey(key)
-                    for exe_name in ["QQ.exe", "QQNT.exe"]:
-                        exe = os.path.join(path, exe_name)
-                        if os.path.exists(exe):
-                            return 'NT' if 'QQNT' in exe_name else 'classic', exe
-                except OSError:
-                    pass
-    except Exception:
-        pass
     return None, None
 
 
-# ── Helpers ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════
 
 def get_wxid_from_path(account_dir):
-    """Extract wxid from account directory (v3.x or v4.x)."""
+    """Extract wxid from any account directory."""
     name = os.path.basename(account_dir)
     if name.startswith("wxid_"):
         return name
-
-    # v4.x: login dir IS the wxid
     parent = os.path.basename(os.path.dirname(account_dir))
-    if parent == 'login' and name.startswith('wxid_'):
-        return name
-
-    # v3.x config file
-    config_path = os.path.join(account_dir, "config", "AccInfo.dat")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            m = re.search(r'wxid_[a-zA-Z0-9_]+', content)
-            if m:
-                return m.group(0)
-        except Exception:
-            pass
-    return name
+    if parent.startswith("wxid_"):
+        return parent
+    # Try to find in login dir
+    return _find_wxid_from_xwechat() or name
 
 
 def get_qq_uin_from_path(account_dir):
@@ -271,30 +322,8 @@ def get_qq_uin_from_path(account_dir):
 def get_wechat_version_info(base_dir, version):
     """Get WeChat version-specific info."""
     info = {'version': version, 'base_dir': base_dir}
-
-    if version == '4.x':
-        # Read key_info.dat
-        login_dir = os.path.join(base_dir, "login")
-        if os.path.isdir(login_dir):
-            for item in os.listdir(login_dir):
-                item_path = os.path.join(login_dir, item)
-                if os.path.isdir(item_path) and item.startswith('wxid_'):
-                    key_file = os.path.join(item_path, 'key_info.dat')
-                    if os.path.exists(key_file):
-                        info['has_key_file'] = True
-                    # Check for cloud_account.txt
-                    cloud_file = os.path.join(base_dir, 'ilink', 'wechat', 'cloud_account.txt')
-                    if os.path.exists(cloud_file):
-                        info['cloud_account'] = True
-        # Check for local data
+    if version and '4.x' in version:
         info['data_type'] = 'cloud_primary'
-    elif version == '3.x':
-        # Old format - check for MSG databases
-        msg_base = os.path.join(base_dir, "Msg") if os.path.isdir(
-            os.path.join(base_dir, "Msg")) else base_dir
-        msg_dir = os.path.join(base_dir, "Msg") if os.path.isdir(
-            os.path.join(base_dir)) else None
+    else:
         info['data_type'] = 'local_encrypted'
-        info['msg_dir'] = msg_dir
-
     return info

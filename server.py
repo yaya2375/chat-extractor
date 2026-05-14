@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import time
+import tempfile
 import argparse
 import threading
 from datetime import datetime
@@ -51,55 +52,29 @@ def index():
 # ── API: Scan ───────────────────────────────────────────
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
-    """Scan for installed WeChat and QQ instances."""
+    """Deep scan for all WeChat and QQ data."""
     result = {
         'wechat': {'found': False, 'exe': None, 'accounts': []},
         'qq': {'found': False, 'exe': None, 'accounts': []},
+        'wechatmsg_available': _check_wechatmsg(),
     }
 
-    # Scan WeChat
+    # WeChat executable
     wechat_version, wechat_exe_path = utils.find_wechat_exe()
     if wechat_exe_path:
         result['wechat']['found'] = True
         result['wechat']['exe'] = wechat_exe_path
         result['wechat']['version'] = wechat_version
 
-    wechat_ver, wechat_base, wechat_accounts = utils.find_wechat_data_dirs()
-    if wechat_base:
-        result['wechat']['base_dir'] = wechat_base
-        result['wechat']['version'] = wechat_ver or wechat_version
+    # WeChat data — use new deep scanner
+    all_accounts = utils.find_all_wechat_paths()
+    result['wechat']['accounts'] = all_accounts
+    if all_accounts:
+        result['wechat']['base_dir'] = all_accounts[0].get('base_dir')
+        result['wechat']['version'] = '4.x' if any(
+            '4.x' in a.get('type', '') for a in all_accounts) else '3.x'
 
-        for acc_dir in wechat_accounts:
-            try:
-                wxid = utils.get_wxid_from_path(acc_dir)
-                db_info = wechat_db.get_account_info(acc_dir)
-                info = {
-                    'wxid': wxid,
-                    'path': acc_dir,
-                    'db_count': db_info.get('db_count', 0),
-                    'version': db_info.get('version', wechat_ver or ''),
-                    'has_databases': db_info.get('db_count', 0) > 0,
-                }
-                # Determine if actual chat data exists (migration done)
-                if wechat_ver and wechat_ver.startswith('4.x'):
-                    if info['has_databases']:
-                        info['hint'] = f'已检测到 {info["db_count"]} 个数据库，可以进行提取'
-                        info['ready'] = True
-                    else:
-                        info['hint'] = '未检测到聊天数据库。请先通过手机微信"聊天记录迁移"同步数据。\n操作: 手机微信 → 我 → 设置 → 聊天 → 聊天记录迁移与备份 → 迁移到电脑微信'
-                        info['ready'] = False
-                else:
-                    info['ready'] = info['has_databases']
-                result['wechat']['accounts'].append(info)
-            except Exception as e:
-                result['wechat']['accounts'].append({
-                    'wxid': os.path.basename(acc_dir),
-                    'path': acc_dir,
-                    'ready': False,
-                    'error': str(e),
-                })
-
-    # Scan QQ
+    # QQ
     qq_version, qq_exe_path = utils.find_qq_exe()
     if qq_exe_path:
         result['qq']['found'] = True
@@ -122,6 +97,138 @@ def api_scan():
 
     state['scan_results'] = result
     return jsonify(result)
+
+
+# ── API: WeChatMsg Bridge ───────────────────────────────
+
+def _check_wechatmsg():
+    """Check if WeChatMsg is available."""
+    import shutil
+    wm_exe = shutil.which('WeChatMsg') or shutil.which('wechatmsg')
+    if wm_exe:
+        return {'available': True, 'path': wm_exe}
+    # Check common install paths
+    candidates = [
+        os.path.expanduser(r'~\Desktop\WeChatMsg'),
+        os.path.expanduser(r'~\Downloads\WeChatMsg'),
+        r'C:\Tools\WeChatMsg',
+        os.path.join(os.path.dirname(__file__), 'WeChatMsg'),
+    ]
+    for d in candidates:
+        exe = os.path.join(d, 'WeChatMsg.exe')
+        if os.path.exists(exe):
+            return {'available': True, 'path': exe}
+    return {'available': False}
+
+
+@app.route('/api/wechatmsg/info', methods=['GET'])
+def api_wechatmsg_info():
+    """Return WeChatMsg bridge info."""
+    return jsonify(_check_wechatmsg())
+
+
+@app.route('/api/wechatmsg/export', methods=['POST'])
+def api_wechatmsg_export():
+    """Call WeChatMsg to export chat records, then import results."""
+    wm = _check_wechatmsg()
+    if not wm['available']:
+        return jsonify({'error': 'WeChatMsg 未安装，请先下载。https://github.com/LC044/WeChatMsg/releases'}), 400
+
+    data = request.get_json() or {}
+    output_dir = data.get('output_dir', tempfile.mkdtemp(prefix='chat_export_'))
+
+    # Build WeChatMsg command
+    try:
+        import subprocess
+        cmd = [wm['path'], '--export', '--output', output_dir]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            return jsonify({'error': f'WeChatMsg 导出失败: {proc.stderr}'}), 500
+
+        # Find exported files
+        imported = 0
+        for root, dirs, files in os.walk(output_dir):
+            for f in files:
+                if f.endswith('.csv'):
+                    # Parse CSV and load into state
+                    msgs = _parse_exported_csv(os.path.join(root, f))
+                    state['messages'].extend(msgs)
+                    imported += len(msgs)
+                elif f.endswith('.json'):
+                    msgs = _parse_exported_json(os.path.join(root, f))
+                    state['messages'].extend(msgs)
+                    imported += len(msgs)
+
+        state['messages'].sort(key=lambda m: m['time'])
+        return jsonify({
+            'status': 'ok',
+            'imported': imported,
+            'output_dir': output_dir,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def _parse_exported_csv(path):
+    """Parse WeChatMsg-exported CSV into our message format."""
+    msgs = []
+    try:
+        import csv
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ts = None
+                for col in ['time', 'Time', 'timestamp']:
+                    if col in row and row[col]:
+                        try:
+                            ts = datetime.fromisoformat(str(row[col]))
+                        except Exception:
+                            try:
+                                ts = datetime.fromtimestamp(float(row[col]))
+                            except Exception:
+                                ts = datetime(2000, 1, 1)
+                        break
+                if ts is None:
+                    ts = datetime(2000, 1, 1)
+
+                sender = row.get('sender', row.get('Sender', row.get('talker', '')))
+                content = row.get('content', row.get('Content', row.get('message', '')))
+                if not content:
+                    continue
+
+                msgs.append({
+                    'sender': str(sender),
+                    'content': str(content),
+                    'time': ts,
+                    'type': row.get('type', row.get('Type', 'text')),
+                    'platform': '微信',
+                    'chat_name': row.get('chat', row.get('Chat', '')),
+                })
+    except Exception:
+        pass
+    return msgs
+
+
+def _parse_exported_json(path):
+    """Parse WeChatMsg-exported JSON into our message format."""
+    msgs = []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            for item in data:
+                ts = datetime.fromisoformat(item.get('time', '2000-01-01T00:00:00'))
+                msgs.append({
+                    'sender': str(item.get('sender', '')),
+                    'content': str(item.get('content', '')),
+                    'time': ts,
+                    'type': item.get('type', 'text'),
+                    'platform': '微信',
+                    'chat_name': item.get('chat', ''),
+                })
+    except Exception:
+        pass
+    return msgs
 
 
 # ── API: Extract WeChat ─────────────────────────────────
