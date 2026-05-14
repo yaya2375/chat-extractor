@@ -45,7 +45,7 @@ echo.
 :: Install/update dependencies
 echo.
 echo [信息] 安装依赖 (首次可能需要几分钟) ...
-%PYTHON% -m pip install -q flask pymem psutil pycryptodome
+%PYTHON% -m pip install -q -r requirements.txt
 if errorlevel 1 (
     echo [WARNING] 部分依赖安装失败，尝试继续...
 )
